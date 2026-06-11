@@ -357,8 +357,7 @@ window.addEventListener('keydown', e=>{ if(e.key==='m'||e.key==='M'){ muted=!mut
 // Stretched spellings force the TTS to drawl; slower rate lets the incredulity breathe.
 // index-aligned with VOICE_CLIPS.kat — these only speak if the real clip can't play
 const WAIL_LINES = [
-  {t:'OH my GAWWWWD, bro.', pitch:1.7,  rate:0.95},
-  {t:'nah, for sure.',      pitch:1.55, rate:0.9},
+  {t:'nah, for sure.', pitch:1.55, rate:0.9},
 ];
 // prefer a breathy/soft system voice over the default robot.
 // Voice OBJECTS go stale across reloads/cancels in Chrome — store the NAME, resolve fresh each speak.
@@ -382,11 +381,10 @@ try{
 // Recorded voice clips (baked with macOS voices: Thomas for French, Samantha for zest).
 // Real audio files play everywhere — including webviews where speechSynthesis is silently dead.
 // playbackRate > 1 with preservesPitch off = higher + faster = zestier.
-// ACTUAL Karl-Anthony Towns audio — only the certified hits made the final cut.
+// ACTUAL Karl-Anthony Towns audio — one certified hit made the final cut.
 const VOICE_CLIPS = {
   oui: [{src:'wq-audio/oui.m4a', rate:1.05}],
   kat: [
-    {src:'wq-audio/kat1.m4a', rate:1.0},          // "Oh my god, bro."
     {src:'wq-audio/kat-nahforsure.mp3', rate:1.0},// "Nah, for sure."
   ],
 };
@@ -745,20 +743,40 @@ function togglePause(){
   btnPause.textContent = G.paused ? '▶' : '⏸';
   if (G.paused){
     if (!G.replayMode) saveProgress();
-    showCard(`
-      <h2>TIMEOUT</h2>
-      <p>${G.replayMode
-        ? 'Replay series — your campaign save is untouched.'
-        : 'Progress saved. Resuming from the menu restarts this game at tip-off.'}</p>
-      <button class="go" onclick="togglePause()">RESUME</button>
-      <button class="go danger" onclick="exitToMenu()">MAIN MENU</button>
-      <p class="small">From the main menu: continue the pilgrimage, start a new one, or replay any conquered series.</p>
-    `);
+    showPauseCard();
   } else {
     hideCard();
     toast('GO!');
   }
 }
+window.showPauseCard = function(){
+  showCard(`
+    <h2>TIMEOUT</h2>
+    <p>${G.replayMode
+      ? 'Replay series — your campaign save is untouched.'
+      : 'Progress saved. Resuming from the menu restarts this game at tip-off.'}</p>
+    <button class="go" onclick="togglePause()">RESUME</button>
+    <button class="go" onclick="showHowTo()">HOW TO PLAY</button>
+    <button class="go danger" onclick="exitToMenu()">MAIN MENU</button>
+    <p class="small">From the main menu: continue the pilgrimage, start a new one, or replay any conquered series.</p>
+  `);
+};
+window.showHowTo = function(){
+  showCard(`
+    <h3>HOW TO PLAY</h3>
+    <div class="rules">
+      <div class="rule"><b>🏃 MOVE</b>WASD / arrow keys — or drag a finger and he follows it.</div>
+      <div class="rule"><b>👋 SWAT</b>Click or tap where you want to swing. SPACE swats the way he's facing. One gentle touch = they fly, cry, and post about it.</div>
+      <div class="rule"><b>🏀 STOP THE DRIVES</b>Players with the ball are headed to YOUR hoop on the left. Body them or swat them — every flop is +2 points (+1 if the ref saw it).</div>
+      <div class="rule bad"><b>🎭 FLOP ARTISTS</b>The flashing ones dive near the ref to draw fouls ON YOU. Swat them mid-performance or keep your distance. 6 fouls = fouled out = game lost.</div>
+      <div class="rule"><b>⚡ ALIEN AURA</b>Absorbing contact charges the bar. At 100%, press E or the AURA button — everyone on the court flops at once.</div>
+      <div class="rule bad"><b>⭕ PICKUPS</b>Solid rings are power-ups (daggers, nuns, churros, Swipa, melons…). Dashed red rings are hazards — walk over one and regret it.</div>
+      <div class="rule"><b>🏆 THE SERIES</b>Best of 7, real 2026 bracket. Win 4 before they do. Every round gets meaner; road games hit harder; big leads make them rally.</div>
+      <div class="rule"><b>⏸ EXTRAS</b>P or ⏸ pauses (and saves). M mutes. ⛶ goes fullscreen. Beaten series unlock replays in the trophy case.</div>
+    </div>
+    <button class="go" onclick="showPauseCard()">← BACK</button>
+  `);
+};
 window.togglePause = togglePause;
 window.exitToMenu = function(){
   G.paused = false;
@@ -2489,6 +2507,8 @@ function render(){
   if (G.shake>0.5) ctx.translate((Math.random()-0.5)*G.shake, (Math.random()-0.5)*G.shake);
   drawCourt();
   drawPowerups();
+  // scoreboard sits on the arena wall — players walk in FRONT of it
+  if (G.scene==='play' || G.scene==='between') drawScoreboard();
   const drawables = [...opponents].sort((a,b)=>a.y-b.y);
   let wembyDrawn=false, refDrawn=false;
   for (const o of drawables){
@@ -2510,7 +2530,6 @@ function render(){
     ctx.fillText('🦊 SWIPA MODE: '+Math.ceil(G.swipa/60)+'s', 14, G.freeze>0 ? 128 : 104);
   }
   drawFlash();
-  if (G.scene==='play' || G.scene==='between') drawScoreboard();
   if (G.scene==='between'){
     ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,H*0.15,W,80);
     ctx.font='900 34px Bangers, cursive'; ctx.textAlign='center';
