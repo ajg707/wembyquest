@@ -967,12 +967,10 @@ let opponents = [];
 let particles = [];
 let floaters = [];
 let ref = { x:140, y:140, vx:0.45, vy:0.3, shrug:0, whistle:0, point:0, persona:null };
-// real refs (real faces, freely licensed). quirk = expected phantom fouls per game
+// the two famous ACTIVE whistles of these playoffs (real faces, freely licensed)
 const REFS = [
-  {name:'TONY BROTHERS', quirk:1.2,  tagline:'personal vendetta (documented)',      img:'wq-refs/brothers.jpg'},
-  {name:'JOEY CRAWFORD', quirk:1.0,  tagline:'once ejected a man for laughing',     img:'wq-refs/crawford.jpg'},
-  {name:'STEVE JAVIE',   quirk:0.8,  tagline:'technical foul artist',               img:'wq-refs/javie.jpg'},
-  {name:'DICK BAVETTA',  quirk:0.5,  tagline:'has not missed a game since 1975',    img:'wq-refs/bavetta.jpg'},
+  {name:'TONY BROTHERS', quirk:1.2,  tagline:'personal vendetta (documented)', img:'wq-refs/brothers.jpg'},
+  {name:'SCOTT FOSTER',  quirk:0.95, tagline:'The Extender',                   img:'wq-refs/foster.jpg'},
 ];
 // (zebra faces preloaded after getFace/faceCache are defined, below)
 
@@ -1025,7 +1023,8 @@ const faceCache = {};
 // per-photo crop overrides (fraction of width / height) for images whose faces
 // don't sit where the generic crop expects
 const FACE_CROPS = {
-  'wq-refs/javie.jpg': {s:0.50, sy:0.015}, // head in the upper third — zoom way in
+  'wq-refs/brothers.jpg': {s:0.56, sy:0.05},           // tight on the face, lose the arena background
+  'wq-refs/foster.jpg':   {s:0.30, sx:0.32, sy:0.075}, // full-body photo — zoom to the head, shifted to his face
 };
 function getFace(id){
   if (!id) return null;
@@ -1050,7 +1049,8 @@ function getFace(id){
         // landscape = NBA headshot (tight face crop); portrait = ref photo (zoom to the face)
         const ov = FACE_CROPS[id];
         const s = ov ? iw*ov.s : (ih > iw ? iw*0.70 : Math.min(iw,ih)*0.60);
-        const sx = (iw-s)/2, sy = ov ? ih*ov.sy : (ih > iw ? ih*0.05 : ih*0.04);
+        const sx = (ov && ov.sx !== undefined) ? iw*ov.sx : (iw-s)/2;
+        const sy = ov ? ih*ov.sy : (ih > iw ? ih*0.05 : ih*0.04);
         fctx.drawImage(img, sx, sy, s, s, 0, 0, D, D);
         img.sprite = c;
       }catch(e){}
@@ -2097,11 +2097,9 @@ function drawRef(){
   for(let i=0;i<3;i++) ctx.fillRect(-9+2+i*6.5, -h*0.78, 3.2, h*0.38);
   const refImg = ref.persona ? faceCache[ref.persona.img] : null;
   if (refImg && refImg.ok && refImg.sprite){
-    // the real face of justice, bobblehead-sized
+    // the real face of justice, bobblehead-sized — no ring, tight crop does the work
     const R = 22, hy2 = -h*0.78-12;
     ctx.drawImage(refImg.sprite, -R, hy2-R, R*2, R*2);
-    ctx.strokeStyle='#000'; ctx.lineWidth=1.6;
-    ctx.beginPath(); ctx.arc(0, hy2, R, 0, 7); ctx.stroke();
   } else {
     ctx.fillStyle='#d9a06a'; ctx.beginPath(); ctx.arc(0,-h*0.78-7,7,0,7); ctx.fill(); ctx.stroke();
   }
