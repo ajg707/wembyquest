@@ -228,6 +228,7 @@
   @media (max-height: 540px){
     #feed{display:none}
     footer{display:none}
+    #stage-wrap{box-shadow:3px 3px 0 #000} /* drop the 80px inset glow — expensive paint, invisible behind the canvas */
     .tagline{display:none}
     #app{padding:4px 8px}
     header{padding:0 4px 4px;gap:10px}
@@ -296,7 +297,8 @@
 
 // ---------- DOM ----------
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+// alpha:false — every frame paints edge to edge, so let the compositor skip blending
+const ctx = canvas.getContext('2d', {alpha:false, desynchronized:true});
 const overlay = document.getElementById('overlay');
 const card = document.getElementById('card');
 const tweetsEl = document.getElementById('tweets');
@@ -309,17 +311,25 @@ const hud = {
   ult: document.getElementById('hud-ult'),
 };
 
-let W = 960, H = 540, DPR = 1;
+let W = 960, H = 540, DPR = 1, DPR_CAP = 2;
+let canvasRect = null; // cached — getBoundingClientRect on every pointermove is a layout read
 function resize(){
   const r = canvas.parentElement.getBoundingClientRect();
   // canvas logical size ALWAYS matches its CSS box — mismatched floors stretch the world
   W = Math.max(280, r.width);
   H = Math.max(200, r.height);
-  DPR = Math.min(2, window.devicePixelRatio || 1); // retina-crisp without melting phones
-  canvas.width = Math.round(W * DPR);
-  canvas.height = Math.round(H * DPR);
+  DPR = Math.min(DPR_CAP, window.devicePixelRatio || 1); // retina-crisp, sheds under load
+  const bw = Math.round(W * DPR), bh = Math.round(H * DPR);
+  if (canvas.width !== bw || canvas.height !== bh){ // reallocating the backing store is expensive
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  canvasRect = canvas.getBoundingClientRect();
+  if (typeof repaint === 'function') repaint();
 }
-window.addEventListener('resize', resize);
+// iOS fires resize bursts during rotation/toolbar changes — debounce the event path
+let resizeDeb = 0;
+window.addEventListener('resize', () => { clearTimeout(resizeDeb); resizeDeb = setTimeout(resize, 120); });
 window.addEventListener('orientationchange', () => setTimeout(resize, 250));
 
 // ---------- AUDIO ----------
@@ -417,6 +427,9 @@ function playClip(clip, fallback){
 let speechRef = null;
 function speakLine(text, opts={}){
   if (muted) return;
+  // iOS: speechSynthesis hops to a system service that can stall the main thread
+  // and duck game audio — recorded clips are the primary path there anyway
+  if (/iPhone|iPad|iPod/.test(navigator.userAgent)) return;
   try{
     const synth = speechSynthesis;
     const u = new SpeechSynthesisUtterance(text);
@@ -596,6 +609,7 @@ const HAZARDS = [
   {key:'knife',   label:'MARBURY SPECIAL (ELBOW=KNIFE)', sub:'rib cage check incoming',      emoji:'🔪', color:'#ff5470', hazard:true},
 ];
 let powerups = []; // {x,y,def,life}
+let delayedFlops = []; // staggered flops scheduled in game ticks (pause/slow-mo safe)
 let recentPowerKeys = []; // anti-repeat: no déjà vu drops
 function spawnPowerup(){
   if (powerups.length >= 3) return;
@@ -628,7 +642,7 @@ function applyPowerup(p){
     for (const o of opponents){
       if (['drive','charge','bounce','lurk','windup','layup','grapple'].includes(o.state)){
         const dx=o.x-wemby.x||0.01, dy=o.y-wemby.y||0.01;
-        setTimeout(()=>{ if(G.scene==='play') flop(o,dx,dy,1.5); }, n*70);
+        delayedFlops.push({o, dx, dy, power:1.5, at: G.t + n*5});
         n++;
       }
     }
@@ -757,9 +771,15 @@ window.showPauseCard = function(){
       : 'Progress saved. Resuming from the menu restarts this game at tip-off.'}</p>
     <button class="go" onclick="togglePause()">RESUME</button>
     <button class="go" onclick="showHowTo()">HOW TO PLAY</button>
+    <button class="go" onclick="toggleMuteCard()">${muted ? '🔇 SOUND: OFF' : '🔊 SOUND: ON'}</button>
     <button class="go danger" onclick="exitToMenu()">MAIN MENU</button>
     <p class="small">From the main menu: continue the pilgrimage, start a new one, or replay any conquered series.</p>
   `);
+};
+window.toggleMuteCard = function(){
+  muted = !muted;
+  try{ if (muted) speechSynthesis.cancel(); }catch(e){}
+  showPauseCard(); // re-render so the button label flips
 };
 window.showHowTo = function(){
   showCard(`
@@ -798,6 +818,33 @@ const IS_STANDALONE = (matchMedia('(display-mode: standalone)').matches ||
                        navigator.standalone === true);
 const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 if (IS_STANDALONE) btnFs.style.display = 'none'; // already fullscreen
+// Android/Chrome fire beforeinstallprompt — capture it so our button can trigger the real install dialog
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstall = e;
+});
+window.installApp = async function(){
+  ac();
+  if (deferredInstall){
+    deferredInstall.prompt();
+    try{ await deferredInstall.userChoice; }catch(e){}
+    deferredInstall = null;
+    return;
+  }
+  // iOS has no install API — walk them through it
+  showCard(`
+    <h3>INSTALL WEMBYQUEST</h3>
+    <h2 style="font-size:46px">📲</h2>
+    <p>Apple doesn't allow one-tap installs — but it's three taps:</p>
+    <div class="rules" style="grid-template-columns:1fr;text-align:left">
+      <div class="rule"><b>1 · TAP SAFARI'S SHARE BUTTON</b>The square with the arrow pointing up, in the toolbar.</div>
+      <div class="rule"><b>2 · "ADD TO HOME SCREEN"</b>Scroll down the share sheet a little — it's there. Tap it, then tap <b>Add</b>.</div>
+      <div class="rule"><b>3 · LAUNCH FROM THE WQ ICON</b>Opens fullscreen in landscape. No address bar. Just basketball and tears.</div>
+    </div>
+    <button class="go" onclick="backToTitle()">← BACK</button>
+  `);
+};
 btnFs.addEventListener('click', async ()=>{
   ac();
   try{
@@ -817,12 +864,13 @@ btnFs.addEventListener('click', async ()=>{
 });
 window.addEventListener('keyup', e=> keys[e.key.toLowerCase()] = false);
 function canvasPos(e){
-  const r = canvas.getBoundingClientRect();
+  const r = canvasRect || canvas.getBoundingClientRect(); // cached: page is position:fixed, canvas can't move mid-drag
   return [(e.clientX-r.left)*(W/r.width), (e.clientY-r.top)*(H/r.height)];
 }
 // touch & mouse: quick TAP = swipe at that spot; PRESS-AND-HOLD / DRAG = glide toward the pointer
 const touch = {active:false, id:null, x:0, y:0, t0:0, sx:0, sy:0, moved:false};
 canvas.addEventListener('pointerdown', e=>{
+  canvasRect = canvas.getBoundingClientRect(); // refresh once per gesture, not per move
   if (G.scene==='montage'){ G.montage.t = 9999; return; } // skip the cinematics
   const [x,y] = canvasPos(e);
   touch.active=true; touch.id=e.pointerId;
@@ -863,14 +911,16 @@ const G = {
   t:0, paused:false,
   freeze:0, grace:0, distract:0, churro:0, swipa:0, wembyStun:0, rallyOn:false, flash:null,
   replayMode:false, montage:null, dance:null, danceIdx:-1,
+  difficulty:'medium',
 };
+try{ G.difficulty = localStorage.getItem('wembyquest-diff') || 'medium'; }catch(e){}
 // ---------- SAVE / LOAD ----------
 const SAVE_KEY = 'wembyquest-save-v2';
 function saveProgress(over){
   try{
     localStorage.setItem(SAVE_KEY, JSON.stringify(Object.assign({
       level:G.level, gameNum:G.gameNum, gamesWon:G.gamesWon, gamesLost:G.gamesLost,
-      tears:G.tears, absorbed:G.absorbed, ult:G.ult, ts:Date.now(),
+      tears:G.tears, absorbed:G.absorbed, ult:G.ult, difficulty:G.difficulty, ts:Date.now(),
     }, over||{})));
   }catch(e){}
 }
@@ -899,13 +949,27 @@ let opponents = [];
 let particles = [];
 let floaters = [];
 let ref = { x:140, y:140, vx:0.45, vy:0.3, shrug:0, whistle:0, point:0, persona:null };
-// real refs, parody vendettas. quirk = expected phantom fouls per game
+// real refs (real faces, freely licensed). quirk = expected phantom fouls per game
 const REFS = [
-  {name:'TONY BROTHERS', quirk:1.2,  tagline:'personal vendetta (documented)'},
-  {name:'SCOTT FOSTER',  quirk:0.9,  tagline:'The Extender'},
-  {name:'MARC DAVIS',    quirk:0.65, tagline:'sees things others cannot'},
-  {name:'ED MALLOY',     quirk:0.5,  tagline:'whistle enthusiast'},
+  {name:'TONY BROTHERS', quirk:1.2,  tagline:'personal vendetta (documented)',      img:'wq-refs/brothers.jpg'},
+  {name:'JOEY CRAWFORD', quirk:1.0,  tagline:'once ejected a man for laughing',     img:'wq-refs/crawford.jpg'},
+  {name:'STEVE JAVIE',   quirk:0.8,  tagline:'technical foul artist',               img:'wq-refs/javie.jpg'},
+  {name:'DICK BAVETTA',  quirk:0.5,  tagline:'has not missed a game since 1975',    img:'wq-refs/bavetta.jpg'},
 ];
+// (zebra faces preloaded after getFace/faceCache are defined, below)
+
+// ---------- DIFFICULTY ----------
+const DIFFS = {
+  easy:   {label:'EASY',   spd:0.85, spawn:1.35, quirk:0.5, capBonus:0, rally:false, blurb:'they cry at the sight of you'},
+  medium: {label:'MEDIUM', spd:1.0,  spawn:1.0,  quirk:1.0, capBonus:0, rally:true,  blurb:'the playoffs as intended'},
+  hard:   {label:'HARD',   spd:1.18, spawn:0.78, quirk:1.5, capBonus:1, rally:true,  blurb:'the refs hate you personally'},
+};
+function getDiff(){ return DIFFS[G.difficulty] || DIFFS.medium; }
+window.setDiff = function(d){
+  G.difficulty = d;
+  try{ localStorage.setItem('wembyquest-diff', d); }catch(e){}
+  showTitle();
+};
 function isHome(){ return L().homeGames.includes(G.gameNum); }
 const PHANTOM_REASONS = ['EXISTING TOO TALL','VIBES','HIS SHADOW MADE CONTACT','BEING FRENCH','BLINKING AGGRESSIVELY','THE LEAGUE OFFICE TEXTED','RETROACTIVE EYE CONTACT','TOO MANY TEARS CAUSED'];
 function phantomFoul(){
@@ -945,12 +1009,45 @@ function getFace(id){
   if (faceCache[id]) return faceCache[id];
   const img = new Image();
   img.ok = false;
-  img.onload = ()=>{ img.ok = true; };
+  img.decoding = 'async';
+  img.onload = ()=>{
+    // pre-compose the circular crop ONCE into a small sprite — per-frame draws become
+    // a single unclipped drawImage instead of save/clip/resample/restore (huge on mobile)
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      try{
+        const D = 144;
+        const c = document.createElement('canvas');
+        c.width = D; c.height = D;
+        const fctx = c.getContext('2d');
+        fctx.beginPath(); fctx.arc(D/2, D/2, D/2, 0, 7); fctx.clip();
+        const iw = img.naturalWidth, ih = img.naturalHeight;
+        // landscape = NBA headshot (tight face crop); portrait = ref photo (wider crop)
+        const s = ih > iw ? iw*0.92 : Math.min(iw,ih)*0.60;
+        const sx = (iw-s)/2, sy = ih > iw ? ih*0.02 : ih*0.04;
+        fctx.drawImage(img, sx, sy, s, s, 0, 0, D, D);
+        img.sprite = c;
+      }catch(e){}
+      img.ok = true;
+      repaint();
+    };
+    // decode() can stall forever in hidden/background pages — race it with a timeout
+    if (img.decode){
+      img.decode().then(finish, finish);
+      setTimeout(finish, 400);
+    } else finish();
+  };
   img.onerror = ()=>{ img.ok = false; };
-  img.src = `https://cdn.nba.com/headshots/nba/latest/260x190/${id}.png`;
+  // numeric id = NBA player headshot; string path/URL = any other face (refs, etc.)
+  img.src = (typeof id === 'string' && (id.includes('/') || id.startsWith('http')))
+    ? id
+    : `https://cdn.nba.com/headshots/nba/latest/260x190/${id}.png`;
   faceCache[id] = img;
   return img;
 }
+REFS.forEach(r => getFace(r.img)); // preload the zebras
 const WEMBY_FACE_ID = 1641705;
 
 function makeOpponent(role){
@@ -966,8 +1063,8 @@ function makeOpponent(role){
   return {
     role, x, y, vx:0, vy:0, face:getFace(fid),
     h: role==='enforcer' ? 92+Math.random()*10 : 82+Math.random()*10,
-    // playoff intensity: deeper games + road games + rallies all add juice
-    speed: (0.95+Math.random()*0.4) * lv.oppSpeed * (role==='scorer'?1.1:1) * (1+(G.gameNum-1)*0.05) * (isHome()?1:1.08) * (G.rallyOn?1.12:1),
+    // playoff intensity: deeper games + road games + rallies + difficulty all add juice
+    speed: (0.95+Math.random()*0.4) * lv.oppSpeed * (role==='scorer'?1.1:1) * (1+(G.gameNum-1)*0.05) * (isHome()?1:1.08) * (G.rallyOn?1.12:1) * getDiff().spd,
     headScale: name==='BRUNSON' ? 2.1 : 1,
     state: role==='scorer' ? 'drive' : (role==='flopper' ? 'lurk' : 'charge'),
     timer:0, rot:0, vrot:0, cryEmit:0, legPhase:Math.random()*6,
@@ -1027,6 +1124,10 @@ function postTweet(opts={}){
   else if (opts.support){ const s = rnd(TW_SUPPORT); who = [s[0],s[1],s[2]]; body = s[3]; }
   else who = rnd(lv.handles);
   if (!body) body = rnd(lv.tweets);
+  tweetCount++;
+  if (tweetCount % 8 === 0) postReal(G.level); // sprinkle in actual journalism
+  // feed hidden (phone landscape)? skip the DOM work entirely
+  if (!tweetsEl.offsetParent) return;
   const el = document.createElement('div');
   el.className = 'tweet' + (opts.breaking ? ' breaking' : '');
   const likes = Math.floor(Math.random()*45000+300);
@@ -1052,10 +1153,11 @@ function postTweet(opts={}){
         <span class="t-act">${ICON.views}${fmtN(views)}</span>
       </div>
     </div>`;
-  tweetsEl.prepend(el);
-  tweetCount++;
-  if (tweetCount % 8 === 0) postReal(G.level); // sprinkle in actual journalism
-  while (tweetsEl.children.length > 24) tweetsEl.removeChild(tweetsEl.lastChild);
+  // insert outside the game frame — DOM parse + reflow shouldn't ride the rAF
+  setTimeout(() => {
+    tweetsEl.prepend(el);
+    while (tweetsEl.children.length > 24) tweetsEl.removeChild(tweetsEl.lastChild);
+  }, 0);
 }
 
 // ---------- ACTIONS ----------
@@ -1129,7 +1231,7 @@ function tryUlt(){
   for (const o of opponents){
     if (['drive','charge','bounce','lurk','windup','layup','grapple'].includes(o.state)){
       const dx=o.x-wemby.x||0.01, dy=o.y-wemby.y||0.01;
-      setTimeout(()=>{ if(G.scene==='play') flop(o,dx,dy,1.8); }, n*90);
+      delayedFlops.push({o, dx, dy, power:1.8, at: G.t + n*6}); // game ticks, not wall clock
       n++;
     }
   }
@@ -1144,7 +1246,7 @@ function startGame(){
   G.clock = L().gameSecs * 60;
   G.combo=1; G.pokeCooldown=0; G.freeze=0; G.flash=null;
   G.grace=0; G.distract=0; G.churro=0; G.swipa=0; G.wembyStun=0; G.rallyOn=false;
-  opponents=[]; particles=[]; floaters=[]; powerups=[];
+  opponents=[]; particles=[]; floaters=[]; powerups=[]; delayedFlops=[];
   wemby.x=W*0.4; wemby.y=H/2;
   timers = { scorer: 60, enforcer: 150, flopper: L().flopperEvery*60*0.7, power: 3.5*60 };
   ref.persona = rnd(REFS);
@@ -1441,8 +1543,8 @@ window.restart = function(){
   tweetsEl.innerHTML='';
   startIntro();
 };
-function showCard(html){ card.innerHTML=html; overlay.classList.remove('hidden'); }
-function hideCard(){ overlay.classList.add('hidden'); }
+function showCard(html){ card.innerHTML=html; overlay.classList.remove('hidden'); repaint(); }
+function hideCard(){ overlay.classList.add('hidden'); repaint(); }
 
 // ---------- TITLE ----------
 function showTitle(){
@@ -1463,8 +1565,12 @@ function showTitle(){
       <span class="key"><b>P</b> pause</span>
       <span class="key"><b>M</b> mute</span>
     </div>
-    <p class="small" style="margin-top:12px">Best of 7, every round — and every round gets meaner. Win 4 before they do, or foul out and watch the crybabies advance. Progress autosaves after every game. Real 2026 bracket: Blazers → Wolves → Thunder → Knicks.</p>
-    ${IS_IOS && !IS_STANDALONE ? '<p class="small" style="color:var(--fiesta-teal)">📲 iPhone tip: tap <b>Share → Add to Home Screen</b>, then launch from the icon — true fullscreen, no Safari bar.</p>' : ''}
+    <div class="controls" style="margin-top:12px">
+      ${Object.keys(DIFFS).map(d => `<span class="key" style="cursor:pointer;${G.difficulty===d ? 'border-color:var(--fiesta-teal);border-bottom-color:var(--fiesta-teal);color:#fff;background:#0a2422' : 'opacity:0.65'}" onclick="setDiff('${d}')"><b>${DIFFS[d].label}</b></span>`).join('')}
+    </div>
+    <p class="small" style="margin-top:4px;color:var(--fiesta-teal)">${DIFFS[G.difficulty].blurb}</p>
+    <p class="small" style="margin-top:8px">Best of 7, every round — and every round gets meaner. Win 4 before they do, or foul out and watch the crybabies advance. Progress autosaves after every game. Real 2026 bracket: Blazers → Wolves → Thunder → Knicks.</p>
+    ${!IS_STANDALONE && (IS_IOS || matchMedia('(pointer: coarse)').matches) ? '<button class="go" style="font-size:18px;padding:7px 18px" onclick="installApp()">📲 INSTALL — PLAY FULLSCREEN</button>' : ''}
     ${contBtn}
     <button class="go ${hasRun?'danger':''}" onclick="startIntro_()">${hasRun?'NEW PILGRIMAGE':'BEGIN THE PILGRIMAGE'}</button>
     ${(() => {
@@ -1510,6 +1616,7 @@ window.continueRun = function(){
   G.level = Math.min(s.level||0, LEVELS.length-1);
   G.tears = s.tears||0; G.absorbed = s.absorbed||0; G.ult = s.ult||0;
   G.gameNum = s.gameNum||1; G.gamesWon = s.gamesWon||0; G.gamesLost = s.gamesLost||0;
+  if (s.difficulty && DIFFS[s.difficulty]) G.difficulty = s.difficulty;
   getFace(WEMBY_FACE_ID);
   ROSTERS[L().abbr].forEach(r=>getFace(r[2]));
   const lv = L();
@@ -1526,92 +1633,111 @@ window.resumeGame = function(){ hideCard(); startGame(); };
 // =====================================================================
 //  RENDERING — articulated players
 // =====================================================================
-function drawCourt(){
+// The court is ~150 draw calls of static content — render it ONCE to an offscreen
+// layer and blit a single image per frame. Rebuilt only when size/level/venue change.
+let courtLayer = null, courtLayerCtx = null, courtKey = '';
+function buildCourtLayer(){
   const lv = L();
-  // crowd band
-  ctx.fillStyle='#17131c'; ctx.fillRect(0,0,W,64);
-  for(let i=0;i<W/14;i++){
-    const flick = (Math.floor(G.t/30)+i)%7===0;
-    ctx.fillStyle = flick ? '#3a3146' : '#241e2e';
-    ctx.beginPath(); ctx.arc(7+i*14, 18+((i*37)%3)*13, 4.5, 0, 7); ctx.fill();
+  const home = (G.scene==='play'||G.scene==='between') ? isHome() : true;
+  if (!courtLayer){
+    courtLayer = document.createElement('canvas');
+    courtLayerCtx = courtLayer.getContext('2d', {alpha:false});
   }
-  // sideline ad board
-  ctx.fillStyle='#0d0d12'; ctx.fillRect(0,64,W,18);
-  ctx.font='800 12px Barlow Condensed'; ctx.fillStyle='#7d7d8d'; ctx.textAlign='center';
+  courtLayer.width = canvas.width;
+  courtLayer.height = canvas.height;
+  const g = courtLayerCtx;
+  g.setTransform(DPR,0,0,DPR,0,0);
+  // crowd band (static — a cheap live sparkle is added at blit time)
+  g.fillStyle='#17131c'; g.fillRect(0,0,W,64);
+  g.fillStyle='#241e2e';
+  g.beginPath();
+  for(let i=0;i<W/14;i++){
+    g.moveTo(7+i*14+4.5, 18+((i*37)%3)*13);
+    g.arc(7+i*14, 18+((i*37)%3)*13, 4.5, 0, 7);
+  }
+  g.fill();
+  // sideline ad board (rotates per game, not per frame)
+  g.fillStyle='#0d0d12'; g.fillRect(0,64,W,18);
+  g.font='800 12px Barlow Condensed'; g.fillStyle='#7d7d8d'; g.textAlign='center';
   const ads = ['FIESTA COLA','TEAR-AID — FOR WHEN IT STINGS','BIG SLICE $1 PIZZA','CRYBABY INSURANCE CO.','FRENCH BAKERY OF PAIN'];
-  for(let i=0;i<5;i++) ctx.fillText(ads[(i+Math.floor(G.t/600))%ads.length], W*(i+0.5)/5, 77);
+  for(let i=0;i<5;i++) g.fillText(ads[(i+G.gameNum)%ads.length], W*(i+0.5)/5, 77);
   // hardwood
   const fy = 82;
-  const grd = ctx.createLinearGradient(0,fy,0,H);
+  const grd = g.createLinearGradient(0,fy,0,H);
   grd.addColorStop(0,'#b07b46'); grd.addColorStop(.5,'#c08a50'); grd.addColorStop(1,'#a9763f');
-  ctx.fillStyle = grd; ctx.fillRect(0,fy,W,H-fy);
-  ctx.strokeStyle='rgba(0,0,0,0.07)'; ctx.lineWidth=1;
-  for(let y=fy;y<H;y+=26){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-  for(let x=0;x<W;x+=120){ ctx.beginPath(); ctx.moveTo(x,fy); ctx.lineTo(x,H); ctx.stroke(); }
-  const home = (G.scene==='play'||G.scene==='between') ? isHome() : true;
-  ctx.fillStyle = lv.courtTint; ctx.fillRect(0,fy,W,H-fy);
-  if (!home){ ctx.fillRect(0,fy,W,H-fy); ctx.fillRect(0,fy,W,H-fy); } // their building, their paint job
+  g.fillStyle = grd; g.fillRect(0,fy,W,H-fy);
+  g.strokeStyle='rgba(0,0,0,0.07)'; g.lineWidth=1;
+  g.beginPath();
+  for(let y=fy;y<H;y+=26){ g.moveTo(0,y); g.lineTo(W,y); }
+  for(let x=0;x<W;x+=120){ g.moveTo(x,fy); g.lineTo(x,H); }
+  g.stroke();
+  g.fillStyle = lv.courtTint; g.fillRect(0,fy,W,H-fy);
+  if (!home){ g.fillRect(0,fy,W,H-fy); g.fillRect(0,fy,W,H-fy); } // their building, their paint job
   // lines
-  ctx.strokeStyle='rgba(245,241,232,0.55)'; ctx.lineWidth=3;
-  ctx.beginPath(); ctx.arc(W/2,(H+fy)/2,64,0,7); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(W/2,fy); ctx.lineTo(W/2,H); ctx.stroke();
-  // our key (left)
-  ctx.strokeRect(0, (H+fy)/2-80, 140, 160);
-  ctx.beginPath(); ctx.arc(140,(H+fy)/2, 52, -Math.PI/2, Math.PI/2); ctx.stroke();
-  // their key (right, decorative)
-  ctx.strokeRect(W-140, (H+fy)/2-80, 140, 160);
-  ctx.beginPath(); ctx.arc(W-140,(H+fy)/2, 52, Math.PI/2, Math.PI*1.5); ctx.stroke();
+  g.strokeStyle='rgba(245,241,232,0.55)'; g.lineWidth=3;
+  g.beginPath(); g.arc(W/2,(H+fy)/2,64,0,7); g.stroke();
+  g.beginPath(); g.moveTo(W/2,fy); g.lineTo(W/2,H); g.stroke();
+  g.strokeRect(0, (H+fy)/2-80, 140, 160);
+  g.beginPath(); g.arc(140,(H+fy)/2, 52, -Math.PI/2, Math.PI/2); g.stroke();
+  g.strokeRect(W-140, (H+fy)/2-80, 140, 160);
+  g.beginPath(); g.arc(W-140,(H+fy)/2, 52, Math.PI/2, Math.PI*1.5); g.stroke();
   // center logo — painted center circle, visible from the rafters
-  ctx.save(); ctx.translate(W/2,(H+fy)/2); ctx.rotate(-0.06);
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  // painted disc behind the mark
-  ctx.fillStyle = home ? 'rgba(12,12,16,0.55)' : lv.jersey+'99';
-  ctx.beginPath(); ctx.arc(0,0,61,0,7); ctx.fill();
-  ctx.strokeStyle = home ? 'rgba(196,206,212,0.9)' : 'rgba(255,255,255,0.85)';
-  ctx.lineWidth=3.5;
-  ctx.beginPath(); ctx.arc(0,0,61,0,7); ctx.stroke();
-  if (home){
-    ctx.font='900 50px Bangers, cursive';
-    ctx.lineWidth=5; ctx.strokeStyle='#000';
-    ctx.strokeText('SAS', 0, -4);
-    ctx.fillStyle='#C4CED4';
-    ctx.fillText('SAS', 0, -4);
-    ctx.font='800 13px Barlow Condensed'; ctx.fillStyle='rgba(255,255,255,0.85)';
-    ctx.fillText('GO SPURS GO', 0, 32);
-  } else {
-    ctx.font='900 50px Bangers, cursive';
-    ctx.lineWidth=5; ctx.strokeStyle='#000';
-    ctx.strokeText(lv.abbr, 0, -4);
-    ctx.fillStyle='#fff';
-    ctx.fillText(lv.abbr, 0, -4);
-    ctx.font='800 13px Barlow Condensed'; ctx.fillStyle='rgba(255,255,255,0.9)';
-    ctx.fillText(lv.city, 0, 32);
-  }
-  ctx.textBaseline='alphabetic';
-  ctx.restore();
+  g.save(); g.translate(W/2,(H+fy)/2); g.rotate(-0.06);
+  g.textAlign='center'; g.textBaseline='middle';
+  g.fillStyle = home ? 'rgba(12,12,16,0.55)' : lv.jersey+'99';
+  g.beginPath(); g.arc(0,0,61,0,7); g.fill();
+  g.strokeStyle = home ? 'rgba(196,206,212,0.9)' : 'rgba(255,255,255,0.85)';
+  g.lineWidth=3.5;
+  g.beginPath(); g.arc(0,0,61,0,7); g.stroke();
+  g.font='900 50px Bangers, cursive';
+  g.lineWidth=5; g.strokeStyle='#000';
+  g.strokeText(home?'SAS':lv.abbr, 0, -4);
+  g.fillStyle = home ? '#C4CED4' : '#fff';
+  g.fillText(home?'SAS':lv.abbr, 0, -4);
+  g.font='800 13px Barlow Condensed'; g.fillStyle='rgba(255,255,255,0.88)';
+  g.fillText(home?'GO SPURS GO':lv.city, 0, 32);
+  g.textBaseline='alphabetic';
+  g.restore();
   // OUR HOOP (left)
-  drawHoop(HOOP.x, HOOP.y);
+  drawHoop(g, HOOP.x, HOOP.y);
   // vignette
-  const vg = ctx.createRadialGradient(W/2,H/2,H*0.35, W/2,H/2, H*0.95);
+  const vg = g.createRadialGradient(W/2,H/2,H*0.35, W/2,H/2, H*0.95);
   vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.35)');
-  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+  g.fillStyle=vg; g.fillRect(0,0,W,H);
 }
-function drawHoop(x,y){
-  // pole + backboard + rim, side view facing right
-  ctx.strokeStyle='#3a3a42'; ctx.lineWidth=7;
-  ctx.beginPath(); ctx.moveTo(x-26,y+60); ctx.lineTo(x-26,y-40); ctx.stroke();
-  ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.strokeStyle='#000'; ctx.lineWidth=2;
-  ctx.fillRect(x-22,y-58,8,52); ctx.strokeRect(x-22,y-58,8,52);
+function drawCourt(){
+  const home = (G.scene==='play'||G.scene==='between') ? isHome() : true;
+  const key = `${canvas.width}x${canvas.height}|${G.level}|${home}|${G.gameNum%5}`;
+  if (key !== courtKey){ courtKey = key; buildCourtLayer(); }
+  ctx.drawImage(courtLayer, 0, 0, W, H);
+  // live crowd sparkle: a handful of dots, not the whole band
+  const fl = Math.floor(G.t/30);
+  const n = Math.floor(W/14);
+  ctx.fillStyle='#3a3146';
+  ctx.beginPath();
+  for (let k=0;k<6;k++){
+    const i = (fl*7 + k*13) % n;
+    ctx.moveTo(7+i*14+4.5, 18+((i*37)%3)*13);
+    ctx.arc(7+i*14, 18+((i*37)%3)*13, 4.5, 0, 7);
+  }
+  ctx.fill();
+}
+function drawHoop(g,x,y){
+  // pole + backboard + rim, side view facing right (draws onto the cached court layer)
+  g.strokeStyle='#3a3a42'; g.lineWidth=7;
+  g.beginPath(); g.moveTo(x-26,y+60); g.lineTo(x-26,y-40); g.stroke();
+  g.fillStyle='rgba(255,255,255,0.85)'; g.strokeStyle='#000'; g.lineWidth=2;
+  g.fillRect(x-22,y-58,8,52); g.strokeRect(x-22,y-58,8,52);
   // rim
-  ctx.strokeStyle='#e84b1f'; ctx.lineWidth=4;
-  ctx.beginPath(); ctx.moveTo(x-14,y-16); ctx.lineTo(x+18,y-16); ctx.stroke();
+  g.strokeStyle='#e84b1f'; g.lineWidth=4;
+  g.beginPath(); g.moveTo(x-14,y-16); g.lineTo(x+18,y-16); g.stroke();
   // net
-  ctx.strokeStyle='rgba(255,255,255,0.8)'; ctx.lineWidth=1.5;
+  g.strokeStyle='rgba(255,255,255,0.8)'; g.lineWidth=1.5;
   for(let i=0;i<4;i++){
-    ctx.beginPath();
-    ctx.moveTo(x-12+i*8, y-16);
-    ctx.lineTo(x-8+i*6, y+6);
-    ctx.stroke();
+    g.beginPath();
+    g.moveTo(x-12+i*8, y-16);
+    g.lineTo(x-8+i*6, y+6);
+    g.stroke();
   }
 }
 
@@ -1789,13 +1915,8 @@ function drawPlayer(p){
     ctx.save();
     ctx.translate(0, hy0 - headR*0.45);
     ctx.scale(f,1); // un-mirror so the face is never flipped
-    ctx.save();
-    ctx.beginPath(); ctx.arc(0,0,R,0,7); ctx.clip();
-    const iw=img.naturalWidth, ih=img.naturalHeight;
-    // tight face crop — stop before the photo's jersey/shoulders sneak in
-    const s = Math.min(iw,ih)*0.60, sx=(iw-s)/2, sy=ih*0.04;
-    ctx.drawImage(img, sx, sy, s, s, -R, -R, R*2, R*2);
-    ctx.restore();
+    // pre-composed circular sprite: one drawImage, no clip, no resample
+    if (img.sprite) ctx.drawImage(img.sprite, -R, -R, R*2, R*2);
     if (p.expression==='cry'){
       // cartoon anguish over a professional headshot — cinema
       ctx.strokeStyle='#6fd6ff'; ctx.lineWidth=3.2; ctx.lineCap='round';
@@ -1869,11 +1990,18 @@ function drawPlayer(p){
 }
 
 // high-contrast name pill — readable from the cheap seats
+const labelWidthCache = new Map(); // measureText forces font shaping — memoize it
 function courtLabel(txt, x, y, opts={}){
   const size = opts.size||18, color = opts.color||'#fff';
   ctx.font = `800 ${size}px Barlow Condensed`;
   ctx.textAlign='center'; ctx.textBaseline='middle';
-  const w = ctx.measureText(txt).width + 16;
+  const wKey = size + '|' + txt;
+  let w = labelWidthCache.get(wKey);
+  if (w === undefined){
+    w = ctx.measureText(txt).width + 16;
+    if (labelWidthCache.size > 400) labelWidthCache.clear();
+    labelWidthCache.set(wKey, w);
+  }
   const hh = size + 9;
   ctx.fillStyle = opts.bg||'rgba(8,8,12,0.8)';
   ctx.beginPath();
@@ -1892,12 +2020,16 @@ function drawWemby(){
   ctx.save();
   ctx.translate(0, bob);
   if (G.ult>=100){
+    if (!drawWemby.auraGrad){ // built once, translated into place each frame
+      const ag = ctx.createRadialGradient(0, 0, 10, 0, 0, 120);
+      ag.addColorStop(0,'rgba(0,178,169,0.8)'); ag.addColorStop(1,'rgba(0,178,169,0)');
+      drawWemby.auraGrad = ag;
+    }
     ctx.save();
     ctx.globalAlpha = 0.22+Math.sin(G.t*0.15)*0.1;
-    const ag = ctx.createRadialGradient(wemby.x, wemby.y-70, 10, wemby.x, wemby.y-70, 120);
-    ag.addColorStop(0,'rgba(0,178,169,0.8)'); ag.addColorStop(1,'rgba(0,178,169,0)');
-    ctx.fillStyle=ag;
-    ctx.beginPath(); ctx.arc(wemby.x,wemby.y-70,120,0,7); ctx.fill();
+    ctx.translate(wemby.x, wemby.y-70);
+    ctx.fillStyle = drawWemby.auraGrad;
+    ctx.beginPath(); ctx.arc(0,0,120,0,7); ctx.fill();
     ctx.restore();
   }
   const moving = !!wemby.moving; // set by update() — keyboard AND finger-drag both count
@@ -1919,7 +2051,7 @@ function drawWemby(){
     pokeExt: wemby.pokeAnim>0 ? Math.sin((12-wemby.pokeAnim)/12*Math.PI) : 0,
   });
   if (dancing) courtLabel(G.dance.name+' 💃', wemby.x, wemby.y - h - 46, {color:'#EF8633', size:18});
-  courtLabel("WEMBANYAMA · 7'5\"", wemby.x, wemby.y - h - 20, {color:'#C4CED4', size:19});
+  courtLabel("WEMBANYAMA", wemby.x, wemby.y - h - 20, {color:'#C4CED4', size:19});
   ctx.restore();
 }
 
@@ -1938,7 +2070,16 @@ function drawRef(){
   ctx.closePath(); ctx.fill(); ctx.stroke();
   ctx.fillStyle='#000';
   for(let i=0;i<3;i++) ctx.fillRect(-9+2+i*6.5, -h*0.78, 3.2, h*0.38);
-  ctx.fillStyle='#d9a06a'; ctx.beginPath(); ctx.arc(0,-h*0.78-7,7,0,7); ctx.fill(); ctx.stroke();
+  const refImg = ref.persona ? faceCache[ref.persona.img] : null;
+  if (refImg && refImg.ok && refImg.sprite){
+    // the real face of justice, bobblehead-sized
+    const R = 17, hy2 = -h*0.78-9;
+    ctx.drawImage(refImg.sprite, -R, hy2-R, R*2, R*2);
+    ctx.strokeStyle='#000'; ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.arc(0, hy2, R, 0, 7); ctx.stroke();
+  } else {
+    ctx.fillStyle='#d9a06a'; ctx.beginPath(); ctx.arc(0,-h*0.78-7,7,0,7); ctx.fill(); ctx.stroke();
+  }
   // whistle
   ctx.fillStyle='#ffd23f'; ctx.beginPath(); ctx.arc(4,-h*0.74,2.6,0,7); ctx.fill();
   if (ref.point>0){
@@ -2126,12 +2267,8 @@ function drawFlash(){
     const img = faceCache[id];
     ctx.strokeStyle=fl.def.color; ctx.lineWidth=6;
     ctx.beginPath(); ctx.arc(fx,cy,R+6,0,7); ctx.stroke();
-    if (img && img.ok){
-      ctx.save(); ctx.beginPath(); ctx.arc(fx,cy,R,0,7); ctx.clip();
-      const iw=img.naturalWidth, ih=img.naturalHeight;
-      const s=Math.min(iw,ih)*0.60, sx=(iw-s)/2, sy=ih*0.04;
-      ctx.drawImage(img,sx,sy,s,s,fx-R,cy-R,R*2,R*2);
-      ctx.restore();
+    if (img && img.ok && img.sprite){
+      ctx.drawImage(img.sprite, fx-R, cy-R, R*2, R*2);
     } else if (fl.def.key==='melons'){
       drawMelonsIcon(fx, cy, 2.6);
     } else {
@@ -2180,9 +2317,12 @@ function drawScoreboard(){
   ctx.beginPath(); ctx.roundRect ? ctx.roundRect(ax-3,ay-3,abw+6,abh+6,7) : ctx.rect(ax-3,ay-3,abw+6,abh+6); ctx.fill();
   ctx.fillStyle='#26262f';
   ctx.beginPath(); ctx.roundRect ? ctx.roundRect(ax,ay,abw,abh,5) : ctx.rect(ax,ay,abw,abh); ctx.fill();
-  const g=ctx.createLinearGradient(ax,0,ax+abw,0);
-  g.addColorStop(0,'#00B2A9'); g.addColorStop(1,'#E13A8E');
-  ctx.fillStyle=g;
+  if (!drawScoreboard.barGrad){ // fixed geometry — build once
+    const bg = ctx.createLinearGradient(ax,0,ax+abw,0);
+    bg.addColorStop(0,'#00B2A9'); bg.addColorStop(1,'#E13A8E');
+    drawScoreboard.barGrad = bg;
+  }
+  ctx.fillStyle = drawScoreboard.barGrad;
   ctx.beginPath(); ctx.roundRect ? ctx.roundRect(ax,ay,abw*(G.ult/100),abh,5) : ctx.rect(ax,ay,abw*(G.ult/100),abh); ctx.fill();
   ctx.fillStyle='#fff'; ctx.font='800 11.5px Barlow Condensed'; ctx.textAlign='left';
   ctx.fillText(G.ult>=100 ? 'ALIEN AURA READY — PRESS E' : 'ALIEN AURA', ax+6, ay+10.5);
@@ -2202,7 +2342,6 @@ function renderPips(){
 
 // ---------- UPDATE ----------
 function update(){
-  G.t++;
   HOOP.y = (H+82)/2;
   const slow = G.slowmo>0 ? 0.35 : 1;
   if (G.slowmo>0) G.slowmo--;
@@ -2236,6 +2375,20 @@ function update(){
   }
   if (G.scene!=='play') return;
   if (G.paused) return;
+  G.t++; // the game clock only beats while the game is actually playing
+
+  // staggered flops scheduled on the game clock (aura / caught-a-body)
+  if (delayedFlops.length){
+    const due = delayedFlops.filter(f => f.at <= G.t);
+    if (due.length){
+      delayedFlops = delayedFlops.filter(f => f.at > G.t);
+      for (const f of due){
+        if (['drive','charge','bounce','lurk','windup','layup','grapple'].includes(f.o.state)){
+          flop(f.o, f.dx, f.dy, f.power);
+        }
+      }
+    }
+  }
 
   // clock
   G.clock -= slow;
@@ -2292,15 +2445,15 @@ function update(){
   if (ref.whistle>0) ref.whistle--;
   if (ref.point>0) ref.point--;
   // vendetta whistle: this crew calls what it feels
-  if (ref.persona && Math.random() < ref.persona.quirk/(L().gameSecs*60)){
+  if (ref.persona && Math.random() < ref.persona.quirk*getDiff().quirk/(L().gameSecs*60)){
     if (phantomFoul()) return;
   }
 
   // spawns
   const lv = L();
   timers.scorer -= slow; timers.enforcer -= slow; timers.flopper -= slow;
-  const spawnMod = (G.rallyOn ? 0.55 : 1) * (isHome() ? 1 : 0.88); // rallies and road games come faster
-  if (timers.scorer<=0){ spawnRole('scorer', lv.scorerCap + (G.rallyOn?1:0)); timers.scorer = lv.scorerEvery*60*(0.75+Math.random()*0.5)*spawnMod; }
+  const spawnMod = (G.rallyOn ? 0.55 : 1) * (isHome() ? 1 : 0.88) * getDiff().spawn; // rallies, road games, difficulty
+  if (timers.scorer<=0){ spawnRole('scorer', lv.scorerCap + (G.rallyOn?1:0) + getDiff().capBonus); timers.scorer = lv.scorerEvery*60*(0.75+Math.random()*0.5)*spawnMod; }
   if (timers.enforcer<=0){ spawnRole('enforcer', 3); timers.enforcer = lv.enforcerEvery*60*(0.75+Math.random()*0.5)*spawnMod; }
   if (timers.flopper<=0){ spawnRole('flopper', lv.flopperCap); timers.flopper = lv.flopperEvery*60*(0.8+Math.random()*0.4)*spawnMod; }
   timers.power -= slow;
@@ -2319,22 +2472,22 @@ function update(){
   if (G.swipa>0) G.swipa--;
   if (G.wembyStun>0) G.wembyStun--;
   if (G.flash && --G.flash.timer<=0) G.flash = null;
-  // rubber-band: build a big lead and they start playing desperate
+  // rubber-band: build a big lead and they start playing desperate (off on easy)
   const lead = G.scoreUs - G.scoreThem;
-  if (lead >= 8 && !G.rallyOn){ G.rallyOn = true; toast("THEY'RE HEATING UP", true); }
+  if (getDiff().rally && lead >= 8 && !G.rallyOn){ G.rallyOn = true; toast("THEY'RE HEATING UP", true); }
   else if (lead < 6 && G.rallyOn) G.rallyOn = false;
   const frozenSkip = (G.freeze>0 && G.t%3!==0) || (G.distract>0 && G.t%4!==0); // frozen/distracted opponents crawl
 
   // opponents
   for (const o of opponents){
     if (frozenSkip && !['flopping','crying','selfflop'].includes(o.state)) continue; // french vanilla freeze
-    o.timer++;
+    o.timer += slow; // state time runs at world speed — slow-mo slows minds AND bodies
     o.facing = o.vx<0?-1:(o.vx>0?1:o.facing);
 
     if (o.state==='drive'){
       // SGA free-throw merchant protocol: falls, whistle, automatic points. craft.
       if (o.name==='SGA' && Math.random()<0.003){
-        o.state='ftdraw'; o.timer=0; o.expression='cry'; o.vrot=1;
+        o.state='ftdraw'; o.timer=0; o.expression='cry'; o.vrot=1; o.ftScored=false;
         sfx.foul(); ref.point=70;
         G.shake = Math.max(G.shake, 7);
         floatText(o.x, o.y-70, 'SGA HAS FALLEN. TWO SHOTS.', '#ff5470', 20);
@@ -2347,10 +2500,11 @@ function update(){
       // Wemby wall
       const wd = Math.hypot(wemby.x-o.x, (wemby.y-10)-o.y);
       if (wd < 46) bounceOff(o);
-      if (d < 52){ o.state='layup'; o.timer=0; o.ballUp=true; }
+      if (d < 52){ o.state='layup'; o.timer=0; o.ballUp=true; o.scored=false; }
     }
     else if (o.state==='layup'){
-      if (o.timer===17){
+      if (!o.scored && o.timer>=17){
+        o.scored = true;
         G.scoreThem += 2;
         sfx.swishThem();
         floatText(HOOP.x+30, HOOP.y-70, '+2 THEM', '#ff5470', 24);
@@ -2375,7 +2529,7 @@ function update(){
       if (d < 44){
         // enforcers sometimes latch on instead of bouncing — hold his arms, slow him down
         if (Math.random() < 0.5){
-          o.state='grapple'; o.timer=0; o.grabSide = o.x < wemby.x ? -1 : 1;
+          o.state='grapple'; o.timer=0; o.grabSide = o.x < wemby.x ? -1 : 1; o.nextSwing = 50;
           floatText(wemby.x, wemby.y-150, 'ARM HOLDING (legal apparently)', '#EF8633', 16);
         } else bounceOff(o);
       }
@@ -2385,7 +2539,8 @@ function update(){
       o.y = wemby.y - 4;
       o.facing = -o.grabSide;
       // random weapon swing — absorbed, naturally
-      if (o.timer % 75 === 50){
+      if (o.timer >= o.nextSwing){
+        o.nextSwing += 75;
         o.weaponT = 22;
         G.absorbed++;
         G.ult = Math.min(100, G.ult+5);
@@ -2446,7 +2601,8 @@ function update(){
       o.y=Math.max(150,Math.min(H-10,o.y));
     }
     else if (o.state==='ftdraw'){
-      if (o.timer===35){
+      if (!o.ftScored && o.timer>=35){
+        o.ftScored = true;
         G.scoreThem += 2;
         sfx.swishThem();
         floatText(o.x, o.y-55, '+2 THEM (FREE THROWS)', '#ff5470', 20);
@@ -2468,15 +2624,18 @@ function update(){
   for (const f of floaters){ f.y+=f.vy; f.life--; }
   floaters = floaters.filter(f=>f.life>0);
 
-  // HUD
-  hud.tears.textContent = G.tears;
-  hud.absorbed.textContent = G.absorbed;
-  hud.combo.textContent = '×'+G.combo;
-  hud.ult.textContent = Math.floor(G.ult)+'%';
-  btnAura.classList.toggle('ready', G.ult>=100);
+  // HUD — write the DOM only when a value actually changed (layout isn't free)
+  if (hudLast.tears !== G.tears){ hudLast.tears = G.tears; hud.tears.textContent = G.tears; }
+  if (hudLast.absorbed !== G.absorbed){ hudLast.absorbed = G.absorbed; hud.absorbed.textContent = G.absorbed; }
+  if (hudLast.combo !== G.combo){ hudLast.combo = G.combo; hud.combo.textContent = '×'+G.combo; }
+  const ultPct = Math.floor(G.ult);
+  if (hudLast.ult !== ultPct){ hudLast.ult = ultPct; hud.ult.textContent = ultPct+'%'; }
+  const auraReady = G.ult>=100;
+  if (hudLast.auraReady !== auraReady){ hudLast.auraReady = auraReady; btnAura.classList.toggle('ready', auraReady); }
   const pIcon = G.paused ? '▶' : '⏸';
   if (btnPause.textContent !== pIcon) btnPause.textContent = pIcon;
 }
+const hudLast = {tears:-1, absorbed:-1, combo:-1, ult:-1, auraReady:null};
 function bounceOff(o){
   const dx=o.x-wemby.x, dy=o.y-(wemby.y-10), d=Math.max(1,Math.hypot(dx,dy));
   o.state='bounce'; o.timer=0;
@@ -2547,10 +2706,42 @@ function render(){
   ctx.restore();
 }
 
-function loop(){
-  update();
-  render();
+// ---------- FIXED-TIMESTEP LOOP ----------
+// One logic tick = 1/60s, ALWAYS — regardless of display refresh.
+// 120Hz ProMotion no longer runs the game at double speed; dropped frames
+// no longer turn the game into slow motion (logic catches up, capped at 4 steps).
+const STEP_MS = 1000/60;
+let lastFrameT = 0, stepAcc = 0;
+// static scenes (menus/pause) render once and stop repainting under the blur
+const STATIC_SCENES = ['title','intro','series-win','series-loss','hot-take','victory'];
+let staticPainted = false;
+function repaint(){ staticPainted = false; } // call when something static changes
+// adaptive resolution: if real frames stay slow, shed DPR rather than stutter
+let frameEMA = 8;
+function loop(now){
   requestAnimationFrame(loop);
+  if (!lastFrameT) lastFrameT = now;
+  stepAcc += Math.min(250, now - lastFrameT); // clamp tab-switch gaps
+  lastFrameT = now;
+  let steps = 0;
+  while (stepAcc >= STEP_MS && steps < 4){ update(); stepAcc -= STEP_MS; steps++; }
+  if (steps === 4) stepAcc = 0; // hopelessly behind: drop the debt, don't spiral
+  const isStatic = (G.paused && G.scene==='play') || STATIC_SCENES.includes(G.scene);
+  if (isStatic){
+    if (!staticPainted){ render(); staticPainted = true; }
+    return;
+  }
+  staticPainted = false;
+  if (steps > 0){
+    const t0 = performance.now();
+    render();
+    frameEMA = frameEMA*0.95 + (performance.now()-t0)*0.05;
+    if (frameEMA > 14 && DPR_CAP > 1){ // sustained heavy frames: drop resolution a notch
+      DPR_CAP = Math.max(1, DPR_CAP - 0.5);
+      resize();
+      frameEMA = 8;
+    }
+  }
 }
 
 // ---------- BOOT ----------
@@ -2568,7 +2759,9 @@ renderPips();
 postTweet({body:"Pregame report: Wembanyama was seen ABSORBING a hug from a teammate with no visible damage. Opposing fanbases have been advised to begin crying early to beat traffic."});
 postTweet({who:INSIDER, breaking:true, body:"League sources confirm tonight's officiating crew has been instructed to 'believe every performance.' Flop artists around the league are stretching. (Woj could not be reached — he is busy running a college program and at peace.)"});
 showTitle();
-loop();
+requestAnimationFrame(loop);
+// webfonts land after first paint — flush stale measurements and repaint
+try{ document.fonts.ready.then(() => { labelWidthCache.clear(); courtKey=''; repaint(); }); }catch(e){}
 </script>
 </body>
 </html>
