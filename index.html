@@ -1004,6 +1004,11 @@ const ROSTERS = {
 };
 // face loader — falls back to drawn cartoon heads if a headshot 404s or you're offline
 const faceCache = {};
+// per-photo crop overrides (fraction of width / height) for images whose faces
+// don't sit where the generic crop expects
+const FACE_CROPS = {
+  'wq-refs/javie.jpg': {s:0.50, sy:0.015}, // head in the upper third — zoom way in
+};
 function getFace(id){
   if (!id) return null;
   if (faceCache[id]) return faceCache[id];
@@ -1024,9 +1029,10 @@ function getFace(id){
         const fctx = c.getContext('2d');
         fctx.beginPath(); fctx.arc(D/2, D/2, D/2, 0, 7); fctx.clip();
         const iw = img.naturalWidth, ih = img.naturalHeight;
-        // landscape = NBA headshot (tight face crop); portrait = ref photo (wider crop)
-        const s = ih > iw ? iw*0.92 : Math.min(iw,ih)*0.60;
-        const sx = (iw-s)/2, sy = ih > iw ? ih*0.02 : ih*0.04;
+        // landscape = NBA headshot (tight face crop); portrait = ref photo (zoom to the face)
+        const ov = FACE_CROPS[id];
+        const s = ov ? iw*ov.s : (ih > iw ? iw*0.70 : Math.min(iw,ih)*0.60);
+        const sx = (iw-s)/2, sy = ov ? ih*ov.sy : (ih > iw ? ih*0.05 : ih*0.04);
         fctx.drawImage(img, sx, sy, s, s, 0, 0, D, D);
         img.sprite = c;
       }catch(e){}
@@ -2073,7 +2079,7 @@ function drawRef(){
   const refImg = ref.persona ? faceCache[ref.persona.img] : null;
   if (refImg && refImg.ok && refImg.sprite){
     // the real face of justice, bobblehead-sized
-    const R = 17, hy2 = -h*0.78-9;
+    const R = 22, hy2 = -h*0.78-12;
     ctx.drawImage(refImg.sprite, -R, hy2-R, R*2, R*2);
     ctx.strokeStyle='#000'; ctx.lineWidth=1.6;
     ctx.beginPath(); ctx.arc(0, hy2, R, 0, 7); ctx.stroke();
